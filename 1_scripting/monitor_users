@@ -1,0 +1,153 @@
+#!/bin/bash
+
+# Nagios plugin for monitoring current number of logged in users
+# Warning/Critical threshhold determined by total login count
+# Unique user count also returned, ^above can be switched to unique
+# user count by altering $check_count variable on line 68
+
+# Return Codes
+RET_OK=0
+RET_WARN=1
+RET_CRIT=2
+RET_UNKNOWN=3
+
+opt_w_thresh=10
+opt_c_thresh=20
+opt_user=
+opt_verbose=0
+
+function respond {
+  echo $1
+  exit $2
+}
+
+function usage {
+  echo -e "Check number of users currently logged in to system"
+  echo -e "Usage: ./monitor_users [OPTIONS]"
+  echo -e "  -w\t set warning threshold"
+  echo -e "  -c\t set critical threshold"
+  echo -e "  -v\t verbose mode"
+  echo -e "  -h\t print usage"
+  exit $RET_UNKNOWN
+}
+
+while getopts ":w:c:u:vh" o; do
+  case $o in
+    w)
+      opt_w_thresh=$OPTARG;;
+    c)
+      opt_c_thresh=$OPTARG;;
+    u)
+      opt_user=$OPTARG;;
+    v)
+      opt_verbose=1;;
+    h)
+      usage;;
+    \?)
+      respond "Invalid option: -$OPTARG" $RET_UNKNOWN;;
+    :)
+      respond "-$OPTARG requires argument" $RET_UNKNOWN;;
+  esac
+done
+
+# Get logged in users by name, filter by -u if given
+base_str="who | awk '{print \$1}' |"
+if [ ! -z $opt_user ]; then
+  base_str="$base_str grep $opt_user |"
+fi
+
+# Count total logins
+login_str="$base_str wc -l"
+login_count=$(eval $login_str)
+
+# Count unique names
+unique_str="$base_str sort | uniq | wc -l"
+unique_count=$(eval $unique_str)
+
+# Alter this to change which count is used to determine warn/crit threshhold
+check_count=$login_count
+
+function verbose_print {
+  if [ $opt_verbose -eq 1 ]; then
+    echo $1
+  fi
+}
+
+# Ensure threshold arguments are numeric
+function check_numeric {
+  if [[ $1 != [0-9]* ]]; then
+    verbose_print "Non numeric argument given"
+    respond "Invalid argument" $RET_UNKNOWN
+  fi
+}
+
+# return 0 for OK, 1 for alert
+function check_alert {
+  thresh=$1
+  reverse=0
+
+  # Check for leading '@' symbol
+  if [[ $thresh == \@* ]]; then
+    reverse=1
+    thresh=${thresh:1}
+  fi
+
+  # Parse threshold range
+  if [[ $thresh == *:* ]]; then
+    IFS=":" read -r low high <<< $thresh
+  else
+    low=0
+    high=$thresh
+  fi
+
+  alert=0
+  # Check for low alert
+  if [[ $low != ~ ]]; then
+    check_numeric $low
+    if [ $low -gt $check_count ]; then
+      alert=1
+    fi
+  fi
+
+  # Check for high alert
+  if [[ ! -z $high ]]; then
+    check_numeric $high
+    if [ $high -lt $check_count ]; then
+      alert=1
+    fi
+  fi
+
+  # Ensure threshold range is sane
+  if [ $low -gt $high ]; then
+    verbose_print "Low threshold is greater than high threshold"
+    respond "Invalid argument" $RET_UNKNOWN
+  fi
+
+  # Negate alert value if '@' symbol was used
+  if [ $reverse -eq 1 ]; then
+    if [ $alert -eq 0 ]; then
+      return 1
+    else
+      return 0
+    fi
+  fi
+
+  return $alert
+}
+
+msg="Total logins: $login_count, Unique users: $unique_count"
+if [ ! -z $opt_user ]; then
+  msg="[User $opt_user] $msg"
+fi
+
+check_alert $opt_c_thresh
+if [ $? -eq 1 ]; then
+  respond "Users CRITICAL - $msg" $RET_CRIT
+fi
+
+check_alert $opt_w_thresh
+if [ $? -eq 1 ]; then
+  respond "Users WARN - $msg" $RET_WARN
+fi
+
+respond "Users OK - $msg" $RET_OK
